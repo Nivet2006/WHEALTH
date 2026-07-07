@@ -17,6 +17,9 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.graphics.Bitmap;
+import java.io.File;
+import java.io.FileOutputStream;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -30,18 +33,18 @@ public class MainActivity extends Activity {
             "emergency_phone", "blood_group", "conditions", "allergies", "medications", "doctor"
     };
     private static final String[] PROFILE_TITLES = {
-            "What should we call you?", "Age or date of birth", "Gender", "Height",
+            "What should we call you?", "When were you born?", "Gender", "Height",
             "Your phone number", "Emergency contact name", "Emergency contact number",
             "Blood group", "Known conditions", "Allergies", "Current medications", "Doctor details"
     };
     private static final String[] PROFILE_HINTS = {
-            "Name", "Example: 42 or 10 Jan 1984", "Example: Male, Female, Other", "Example: 172 cm",
+            "Name", "Example: 1984-01-10 or 10 Jan 1984", "Example: Male, Female, Other", "Example: 172 cm",
             "Phone number", "Name", "Phone number", "Example: O+", "Diabetes, hypertension, asthma...",
             "Food or medicine allergies...", "Medicine names or doses...", "Name and phone"
     };
     private static final String[] PROFILE_HELP = {
             "This appears on your dashboard and reports.",
-            "Used only for your local profile and exported summaries.",
+            "Enter your date of birth. We'll compute your age automatically.",
             "Optional, but useful for doctor-facing reports.",
             "Helps with BMI and weight context later.",
             "Kept locally on this phone.",
@@ -74,6 +77,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        // Initialize OpenCV
+        org.opencv.android.OpenCVLoader.initDebug();
+        
+        // Start background download of Tesseract eng.traineddata
+        OCRFallbackService.checkAndDownloadTessData(this);
+
         db = new HealthDb(this);
         if (db.hasProfile()) {
             showDashboard();
@@ -112,20 +122,46 @@ public class MainActivity extends Activity {
         root.addView(body(PROFILE_HELP[step]));
 
         LinearLayout inputCard = card();
-        EditText input = new EditText(this);
-        input.setHint(PROFILE_HINTS[step]);
-        input.setText(safe(pendingProfileValues.get(key), ""));
-        input.setInputType(inputTypeFor(key));
-        if (isLongProfileField(key)) input.setMinLines(4);
-        styleInput(input);
-        inputCard.addView(input);
+        final View inputView;
+        if ("gender".equals(key)) {
+            android.widget.Spinner spinner = new android.widget.Spinner(this);
+            String[] genderOptions = {"Male", "Female"};
+            android.widget.ArrayAdapter<String> adapter = new android.widget.ArrayAdapter<>(
+                    this, android.R.layout.simple_spinner_item, genderOptions);
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spinner.setAdapter(adapter);
+            spinner.setPadding(dp(14), dp(12), dp(14), dp(12));
+            spinner.setBackground(round(Color.rgb(248, 250, 252), dp(16), dp(1), line));
+
+            String existing = safe(pendingProfileValues.get(key), "");
+            if ("Female".equalsIgnoreCase(existing)) {
+                spinner.setSelection(1);
+            } else {
+                spinner.setSelection(0);
+            }
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.setMargins(0, dp(8), 0, dp(8));
+            spinner.setLayoutParams(lp);
+            inputCard.addView(spinner);
+            inputView = spinner;
+        } else {
+            EditText input = new EditText(this);
+            input.setHint(PROFILE_HINTS[step]);
+            input.setText(safe(pendingProfileValues.get(key), ""));
+            input.setInputType(inputTypeFor(key));
+            if (isLongProfileField(key)) input.setMinLines(4);
+            styleInput(input);
+            inputCard.addView(input);
+            inputView = input;
+        }
         root.addView(inputCard);
 
         LinearLayout controls = row();
         if (step > 0) {
             Button back = secondary("Back");
             back.setOnClickListener(v -> {
-                pendingProfileValues.put(key, text(input));
+                pendingProfileValues.put(key, getInputValue(inputView));
                 showProfileStep(modules, step - 1);
             });
             controls.addView(back);
@@ -133,7 +169,7 @@ public class MainActivity extends Activity {
 
         Button next = primary(step == PROFILE_KEYS.length - 1 ? (db.hasProfile() ? "Save" : "Choose Modules") : "Next");
         next.setOnClickListener(v -> {
-            String value = text(input);
+            String value = getInputValue(inputView);
             if (isRequired(key) && value.isEmpty()) {
                 toast("This one is required.");
                 pulse(inputCard);
@@ -275,12 +311,30 @@ public class MainActivity extends Activity {
 
         LinearLayout photoCard = card();
         photoCard.addView(label("Photo assist"));
-        photoCard.addView(body(pendingImageUri == null ? "Attach a device photo when you want OCR help." : "Photo attached. Review every value before saving."));
-        Button image = secondary(pendingImageUri == null ? "Attach Photo" : "Change Photo");
+        photoCard.addView(body(pendingImageUri == null ? "Capture a reading photo for automated OCR prefill." : "Photo captured. Review every value before saving."));
+        if (pendingImageUri != null) {
+            android.widget.ImageView previewImg = new android.widget.ImageView(this);
+            if ("file".equalsIgnoreCase(pendingImageUri.getScheme())) {
+                Bitmap bmp = android.graphics.BitmapFactory.decodeFile(pendingImageUri.getPath());
+                if (bmp != null) {
+                    previewImg.setImageBitmap(bmp);
+                } else {
+                    previewImg.setImageURI(pendingImageUri);
+                }
+            } else {
+                previewImg.setImageURI(pendingImageUri);
+            }
+            previewImg.setAdjustViewBounds(true);
+            previewImg.setMaxHeight(dp(150));
+            previewImg.setPadding(0, dp(8), 0, dp(8));
+            LinearLayout.LayoutParams imgLp = new LinearLayout.LayoutParams(-1, -2);
+            imgLp.setMargins(0, dp(4), 0, dp(4));
+            previewImg.setLayoutParams(imgLp);
+            photoCard.addView(previewImg);
+        }
+        Button image = secondary(pendingImageUri == null ? "Capture Photo" : "Recapture Photo");
         image.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.setType("image/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            Intent intent = new Intent(this, CameraActivity.class);
             startActivityForResult(intent, PICK_IMAGE);
         });
         Button ocr = secondary("Prefill Review Form");
@@ -363,6 +417,14 @@ public class MainActivity extends Activity {
         root.addView(call);
 
         root.addView(section("Medical Info"));
+        String dobVal = profile.get("dob");
+        if (dobVal != null && !dobVal.trim().isEmpty()) {
+            String ageStr = calculateAgeStr(dobVal);
+            if (!ageStr.isEmpty()) {
+                root.addView(infoLine("Age", ageStr));
+            }
+            root.addView(infoLine("Date of birth", dobVal));
+        }
         root.addView(infoLine("Blood group", safe(profile.get("blood_group"), "Not provided")));
         root.addView(infoLine("Conditions", safe(profile.get("conditions"), "Not provided")));
         root.addView(infoLine("Allergies", safe(profile.get("allergies"), "Not provided")));
@@ -370,20 +432,258 @@ public class MainActivity extends Activity {
         show(root);
     }
 
+    private String calculateAgeStr(String dobString) {
+        if (dobString == null || dobString.trim().isEmpty()) return "";
+        String[] formats = {"yyyy-MM-dd", "dd/MM/yyyy", "dd-MM-yyyy", "MMM dd, yyyy", "dd MMM yyyy", "yyyy"};
+        java.util.Calendar birth = java.util.Calendar.getInstance();
+        boolean parsed = false;
+
+        int year = -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\b(19|20)\\d{2}\\b").matcher(dobString);
+        if (m.find()) {
+            try {
+                year = Integer.parseInt(m.group());
+            } catch (Exception ignored) {}
+        }
+
+        for (String format : formats) {
+            try {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(format, java.util.Locale.US);
+                sdf.setLenient(false);
+                java.util.Date date = sdf.parse(dobString);
+                if (date != null) {
+                    birth.setTime(date);
+                    parsed = true;
+                    break;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        java.util.Calendar today = java.util.Calendar.getInstance();
+        if (parsed) {
+            int age = today.get(java.util.Calendar.YEAR) - birth.get(java.util.Calendar.YEAR);
+            if (today.get(java.util.Calendar.DAY_OF_YEAR) < birth.get(java.util.Calendar.DAY_OF_YEAR)) {
+                age--;
+            }
+            if (age < 0) age = 0;
+            return age + " years";
+        } else if (year != -1) {
+            int age = today.get(java.util.Calendar.YEAR) - year;
+            if (age < 0) age = 0;
+            return age + " years";
+        }
+
+        try {
+            int age = Integer.parseInt(dobString.replaceAll("[^0-9]", ""));
+            if (age > 0 && age < 130) {
+                return age + " years";
+            }
+        } catch (Exception ignored) {}
+
+        return "";
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == PICK_IMAGE && resultCode == RESULT_OK && data != null) {
-            pendingImageUri = data.getData();
-            if (pendingImageUri != null) {
-                getContentResolver().takePersistableUriPermission(
-                        pendingImageUri,
-                        data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION
-                );
-                if (activeModule != null) showEntry(activeModule);
-                toast("Photo attached. Use prefill, then confirm.");
+            String uriStr = data.getStringExtra("image_uri");
+            double cropLeft = data.getDoubleExtra("crop_left", 0.08);
+            double cropTop = data.getDoubleExtra("crop_top", 0.35);
+            double cropWidth = data.getDoubleExtra("crop_width", 0.84);
+            double cropHeight = data.getDoubleExtra("crop_height", 0.30);
+
+            if (uriStr != null) {
+                pendingImageUri = Uri.parse(uriStr);
+                if (activeModule != null) {
+                    showEntry(activeModule);
+                    runOcr(pendingImageUri, activeModule, cropLeft, cropTop, cropWidth, cropHeight);
+                }
+            } else {
+                pendingImageUri = data.getData();
+                if (pendingImageUri != null) {
+                    try {
+                        getContentResolver().takePersistableUriPermission(
+                                pendingImageUri,
+                                data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        );
+                    } catch (Exception ignored) {}
+                    if (activeModule != null) {
+                        showEntry(activeModule);
+                        runOcr(pendingImageUri, activeModule, 0.08, 0.35, 0.84, 0.30);
+                    }
+                }
             }
         }
+    }
+
+    private void runOcr(Uri imageUri, String module, double cropLeft, double cropTop, double cropWidth, double cropHeight) {
+        if (imageUri == null) return;
+
+        toast("Processing reading photo...");
+
+        new Thread(() -> {
+            try {
+                String inputPath = "";
+                if ("file".equalsIgnoreCase(imageUri.getScheme())) {
+                    inputPath = imageUri.getPath();
+                    if (inputPath.startsWith("/") && inputPath.contains(":")) {
+                        inputPath = inputPath.substring(1);
+                    }
+                } else {
+                    java.io.File tempFile = new java.io.File(getCacheDir(), "ocr_input.jpg");
+                    try (java.io.InputStream is = getContentResolver().openInputStream(imageUri);
+                         java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile)) {
+                        byte[] buffer = new byte[4096];
+                        int read;
+                        while ((read = is.read(buffer)) != -1) {
+                            fos.write(buffer, 0, read);
+                        }
+                    }
+                    inputPath = tempFile.getAbsolutePath();
+                }
+
+                File debugDir = new File(getFilesDir(), "ocr_debug");
+                if (!debugDir.exists()) debugDir.mkdirs();
+
+                String rotatedPath = new File(debugDir, "rotated.jpg").getAbsolutePath();
+                String croppedPath = new File(debugDir, "cropped_lcd.jpg").getAbsolutePath();
+                String thresholdPath = new File(debugDir, "thresholded.jpg").getAbsolutePath();
+
+                // Step 1 & 2: EXIF Auto Rotate, Landscape Normalize, and Visual crop
+                Bitmap croppedBmp = ImagePreprocessor.preprocess(this, inputPath, croppedPath, 
+                        cropLeft, cropTop, cropWidth, cropHeight);
+
+                final Uri croppedUri = Uri.fromFile(new File(croppedPath));
+
+                // Load Mat for OpenCV enhancements
+                org.opencv.core.Mat srcMat = new org.opencv.core.Mat();
+                org.opencv.android.Utils.bitmapToMat(croppedBmp, srcMat);
+
+                // Step 3 & 4: Warp LCD (already cropped, but let's warp skewness if detected)
+                org.opencv.core.MatOfPoint2f lcdCorners = LCDDetector.detectLCD(srcMat);
+                org.opencv.core.Mat warpedMat = PerspectiveCorrector.warp(srcMat, lcdCorners);
+
+                // Step 5: Binary enhancements
+                org.opencv.core.Mat thresholdMat = ThresholdProcessor.process(warpedMat);
+
+                Bitmap thresholdBmp = Bitmap.createBitmap(thresholdMat.cols(), thresholdMat.rows(), Bitmap.Config.ARGB_8888);
+                org.opencv.android.Utils.matToBitmap(thresholdMat, thresholdBmp);
+                try (FileOutputStream fos = new FileOutputStream(thresholdPath)) {
+                    thresholdBmp.compress(Bitmap.CompressFormat.JPEG, 80, fos);
+                }
+
+                srcMat.release();
+                warpedMat.release();
+
+                MeasurementParser.BPResult finalResult = new MeasurementParser.BPResult();
+                finalResult.imagePath = croppedPath;
+
+                if ("Blood Pressure".equals(module)) {
+                    // Step 6 & 7: Digit segments row grouping
+                    List<List<DigitContourDetector.DigitRect>> digitRows = 
+                            DigitContourDetector.detectAndGroup(thresholdMat);
+
+                    // Step 8: Seven Segment Recognition
+                    String sys = SevenSegmentRecognizer.recognizeRow(thresholdMat, digitRows.get(0));
+                    String dia = SevenSegmentRecognizer.recognizeRow(thresholdMat, digitRows.get(1));
+                    String pulse = SevenSegmentRecognizer.recognizeRow(thresholdMat, digitRows.get(2));
+
+                    thresholdMat.release();
+
+                    if (sys != null && dia != null && pulse != null) {
+                        finalResult.systolic = Integer.parseInt(sys);
+                        finalResult.diastolic = Integer.parseInt(dia);
+                        finalResult.pulse = Integer.parseInt(pulse);
+                        finalResult.source = "Seven Segment Recognition";
+                        finalResult.systolicConfidence = 1.0;
+                        finalResult.diastolicConfidence = 1.0;
+                        finalResult.pulseConfidence = 1.0;
+                    } else {
+                        // Step 8.5: Fallback to PaddleOCR
+                        MeasurementParser.BPResult paddleRes = PaddleOCRService.runPaddleOCR(this, croppedPath);
+                        if (paddleRes != null) {
+                            finalResult = paddleRes;
+                            finalResult.imagePath = croppedPath;
+                        } else {
+                            // Step 9: Fallback to Google ML Kit
+                            try {
+                                com.google.mlkit.vision.text.Text visionText = 
+                                        OCRFallbackService.runMLKitOcr(this, croppedUri);
+                                MeasurementParser.BPResult mlKitRes = 
+                                        MeasurementParser.parseMLKit(visionText, croppedBmp.getHeight());
+                                if (mlKitRes != null) {
+                                    finalResult = mlKitRes;
+                                    finalResult.imagePath = croppedPath;
+                                } else {
+                                    // Step 10: Fallback to Tesseract
+                                    String tessText = OCRFallbackService.runTesseract(this, croppedPath);
+                                    MeasurementParser.BPResult tessRes = MeasurementParser.parseTesseract(tessText);
+                                    if (tessRes != null) {
+                                        finalResult = tessRes;
+                                        finalResult.imagePath = croppedPath;
+                                    }
+                                }
+                            } catch (Exception e) {
+                                String tessText = OCRFallbackService.runTesseract(this, croppedPath);
+                                MeasurementParser.BPResult tessRes = MeasurementParser.parseTesseract(tessText);
+                                if (tessRes != null) {
+                                    finalResult = tessRes;
+                                    finalResult.imagePath = croppedPath;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    thresholdMat.release();
+                    try {
+                        com.google.mlkit.vision.text.Text visionText = 
+                                OCRFallbackService.runMLKitOcr(this, croppedUri);
+                        MeasurementParser.BPResult mlKitRes = 
+                                MeasurementParser.parseMLKit(visionText, croppedBmp.getHeight());
+                        if (mlKitRes != null) {
+                            finalResult = mlKitRes;
+                            finalResult.imagePath = croppedPath;
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                final double score = ConfidenceCalculator.calculate(finalResult);
+                final MeasurementParser.BPResult uiResult = finalResult;
+
+                runOnUiThread(() -> {
+                    pendingImageUri = croppedUri;
+                    showEntry(module);
+
+                    if (uiResult.systolic > 0) setField("SYS", String.valueOf(uiResult.systolic));
+                    if (uiResult.diastolic > 0) setField("DIA", String.valueOf(uiResult.diastolic));
+                    if (uiResult.pulse > 0) setField("Pulse", String.valueOf(uiResult.pulse));
+
+                    if (uiResult.systolic == 0 && uiResult.diastolic == 0 && uiResult.pulse == 0) {
+                        toast("OCR could not confidently read this image. Please enter manually.");
+                    } else if (score < 0.85) {
+                        toast("⚠ Please verify detected values (confidence: " + (int)(score * 100) + "%)");
+                    } else {
+                        toast("Values detected via " + uiResult.source + "!");
+                    }
+                });
+
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    toast("Failed to run CV pipeline: " + e.getMessage());
+                    prefillDemoValues(module);
+                });
+            }
+        });
+    }
+
+    private String getInputValue(View view) {
+        if (view instanceof android.widget.Spinner) {
+            return ((android.widget.Spinner) view).getSelectedItem().toString();
+        } else if (view instanceof EditText) {
+            return text((EditText) view);
+        }
+        return "";
     }
 
     @Override
